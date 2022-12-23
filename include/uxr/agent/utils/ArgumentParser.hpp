@@ -29,6 +29,10 @@
 #include <uxr/agent/transport/udp/UDPv6AgentWindows.hpp>
 #include <uxr/agent/transport/tcp/TCPv4AgentWindows.hpp>
 #include <uxr/agent/transport/tcp/TCPv6AgentWindows.hpp>
+#include <uxr/agent/transport/serial/SerialAgentWindows.hpp>
+#ifdef WIN32_MULTI
+#include <uxr/agent/transport/serial/MultiSerialAgentWindows.hpp>
+#endif
 #else
 #include <uxr/agent/transport/udp/UDPv4AgentLinux.hpp>
 #include <uxr/agent/transport/udp/UDPv6AgentLinux.hpp>
@@ -64,12 +68,12 @@ enum class TransportKind
     UDP6,
     TCP4,
     TCP6,
+    SERIAL,
+    MULTISERIAL,
 #ifndef _WIN32
 #ifdef UAGENT_SOCKETCAN_PROFILE
     CAN,
 #endif // UAGENT_SOCKETCAN_PROFILE
-    SERIAL,
-    MULTISERIAL,
     PSEUDOTERMINAL,
 #endif // _WIN32
     HELP
@@ -659,7 +663,131 @@ private:
     Argument<uint16_t> port_;
 };
 
-#ifndef _WIN32
+#ifdef _WIN32
+/*************************************************************************************************
+ * Specific arguments for serial transports
+ *************************************************************************************************/
+template <typename AgentType>
+class SerialArgs
+{
+public:
+    SerialArgs()
+        : baudrate_("-b", "--baudrate", DEFAULT_BAUDRATE_LEVEL)
+        , dev_("-D", "--dev")
+    {
+    }
+
+    bool parse(
+            int argc,
+            char** argv)
+    {
+        bool baud_result = static_cast<bool>(baudrate_.parse_argument(argc, argv));
+        ParseResult parse_dev = dev_.parse_argument(argc, argv);
+        if (ParseResult::VALID != parse_dev)
+        {
+            std::cerr << "Warning: '--dev <value>'  is required" << std::endl;
+        }
+
+        return baud_result && ParseResult::VALID == parse_dev;
+    }
+
+    const uint32_t baud_rate() const
+    {
+        unsigned long baud = std::stoul(baudrate_.value());
+        if (baud < std::numeric_limits<std::uint32_t>::max())
+        {
+            return std::uint32_t(baud);
+        }
+
+        return 115200;
+    }
+
+
+    const std::string dev()
+    {
+        std::string port;
+
+        if (dev_.found())
+        {
+            port = dev_.value();
+        }
+
+        return port;
+    }
+
+
+    const std::string get_help() const
+    {
+        std::stringstream ss;
+        ss << "    " << baudrate_.get_help() << std::endl;
+        return ss.str();
+    }
+
+protected:
+    Argument<std::string> baudrate_;
+    Argument<std::string> dev_;
+};
+
+
+/*************************************************************************************************
+ * Specific arguments for multi serial termios transports
+ *************************************************************************************************/
+template <typename AgentType>
+class MultiSerialArgs : public SerialArgs<AgentType>
+{
+public:
+    MultiSerialArgs()
+        : SerialArgs<AgentType>()
+        , devs_("-D", "--devs")
+    {
+    }
+
+    bool parse(
+            int argc,
+            char** argv)
+    {
+        if (!SerialArgs<AgentType>::parse(argc, argv))
+        {
+            return false;
+        }
+        ParseResult parse_devs = devs_.parse_argument(argc, argv);
+        if (ParseResult::VALID != parse_devs)
+        {
+            std::cerr << "Warning: '--devs <values>' or '--file <value>' is required" << std::endl;
+        }
+
+        return ((ParseResult::VALID == parse_devs) ? true : false);
+    }
+
+    std::vector<std::string> devs()
+    {
+        std::vector<std::string> ports;
+
+        if (devs_.found())
+        {
+            std::istringstream iss(devs_.value());
+            for (std::string s; iss >> s; )
+            {
+                ports.push_back(s);
+            }
+        }
+
+
+        return ports;
+    }
+
+    const std::string get_help() const
+    {
+        std::stringstream ss;
+        ss << "    " << devs_.get_help();
+        return ss.str();
+    }
+
+private:
+    Argument<std::string> devs_;
+};
+
+#else
 /*************************************************************************************************
  * Specific arguments for pseudoterminal transports
  *************************************************************************************************/
@@ -943,12 +1071,12 @@ public:
         , argv_(argv)
         , common_args_()
         , ip_args_()
+        , serial_args_()
+        , multiserial_args_()
 #ifndef _WIN32
 #ifdef UAGENT_SOCKETCAN_PROFILE
         , can_args_()
 #endif // UAGENT_SOCKETCAN_PROFILE
-        , serial_args_()
-        , multiserial_args_()
         , pseudoterminal_args_()
 #endif // _WIN32
         , transport_kind_(transport_kind)
@@ -979,14 +1107,6 @@ public:
                 result &= ip_args_.parse(argc_, argv_);
                 break;
             }
-#ifndef _WIN32
-#ifdef UAGENT_SOCKETCAN_PROFILE
-            case TransportKind::CAN:
-            {
-                result &= can_args_.parse(argc_, argv_);
-                break;
-            }
-#endif // UAGENT_SOCKETCAN_PROFILE
             case TransportKind::SERIAL:
             {
                 result &= serial_args_.parse(argc_, argv_);
@@ -997,6 +1117,14 @@ public:
                 result &= multiserial_args_.parse(argc_, argv_);
                 break;
             }
+#ifndef _WIN32
+#ifdef UAGENT_SOCKETCAN_PROFILE
+            case TransportKind::CAN:
+            {
+                result &= can_args_.parse(argc_, argv_);
+                break;
+            }
+#endif // UAGENT_SOCKETCAN_PROFILE
             case TransportKind::PSEUDOTERMINAL:
             {
                 result &= pseudoterminal_args_.parse(argc_, argv_);
@@ -1088,7 +1216,10 @@ public:
         ss << common_args_.get_help();
         ss << "  * IPvX (udp4, udp6, tcp4, tcp6)" << std::endl;
         ss << ip_args_.get_help();
-#ifndef _WIN32
+#ifdef _WIN32
+        ss << "  * SERIAL (serial, multiserial)" << std::endl;
+        ss << serial_args_.get_help();
+#else
         ss << "  * SERIAL (serial, multiserial, pseudoterminal)" << std::endl;
         ss << pseudoterminal_args_.get_help();
         ss << serial_args_.get_help();
@@ -1107,19 +1238,57 @@ private:
     char** argv_;
     CommonArgs<AgentType> common_args_;
     IPvXArgs<AgentType> ip_args_;
+    SerialArgs<AgentType> serial_args_;
+    MultiSerialArgs<AgentType> multiserial_args_;
 #ifndef _WIN32
 #ifdef UAGENT_SOCKETCAN_PROFILE
     CanArgs<AgentType> can_args_;
 #endif // UAGENT_SOCKETCAN_PROFILE
-    SerialArgs<AgentType> serial_args_;
-    MultiSerialArgs<AgentType> multiserial_args_;
     PseudoTerminalArgs<AgentType> pseudoterminal_args_;
 #endif // _WIN32
     TransportKind transport_kind_;
     std::unique_ptr<AgentType> agent_server_;
 };
 
-#ifndef _WIN32
+#ifdef _WIN32
+template<> inline bool ArgumentParser<SerialAgent>::launch_agent()
+{
+    agent_server_.reset(new SerialAgent(
+        serial_args_.dev(), serial_args_.baud_rate(), utils::get_mw_kind(common_args_.middleware())));
+
+    if (agent_server_->start())
+    {
+        common_args_.apply_actions(agent_server_);
+        return true;
+    }
+    else
+    {
+        std::cerr << "Error while starting serial agent!" << std::endl;
+    }
+
+    return false;
+}
+
+#ifdef WIN32_MULTI
+template<> inline bool ArgumentParser<MultiSerialAgent>::launch_agent()
+{
+    agent_server_.reset(new MultiSerialAgent(
+        multiserial_args_.devs(), utils::get_mw_kind(common_args_.middleware())));
+
+    if (agent_server_->start())
+    {
+        common_args_.apply_actions(agent_server_);
+        return true;
+    }
+    else
+    {
+        std::cerr << "Error while multistarting serial agent!" << std::endl;
+    }
+
+    return false;
+}
+#endif
+#else
 template<> inline bool ArgumentParser<TermiosAgent>::launch_agent()
 {
     struct termios attr = init_termios(serial_args_.baud_rate().c_str());
