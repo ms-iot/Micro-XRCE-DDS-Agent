@@ -39,7 +39,7 @@ bool SerialAgent::init()
     char portName[MAX_PATH] = "";
     sprintf_s(portName, MAX_PATH, "\\\\.\\%s", port_.c_str());
 
-    comPort_ = CreateFileA(portName, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    comPort_ = CreateFileA(portName, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0/*FILE_FLAG_NO_BUFFERING*/, NULL);
 
     if (comPort_ != INVALID_HANDLE_VALUE)
     {
@@ -53,16 +53,18 @@ bool SerialAgent::init()
             deviceParameters.ByteSize = 8;
             deviceParameters.StopBits = ONESTOPBIT;
             deviceParameters.Parity = NOPARITY;
+            deviceParameters.fRtsControl = RTS_CONTROL_ENABLE;
+            deviceParameters.fDtrControl = DTR_CONTROL_ENABLE;
             if (SetCommState(comPort_, &deviceParameters))
             {
                 return true;
             }
-        } 
-
+        }
 
         // Couldn't set up
         CloseHandle(comPort_);
         comPort_ = INVALID_HANDLE_VALUE;
+
     }
 
     return false;
@@ -105,15 +107,23 @@ ssize_t SerialAgent::read_data(
         int timeout,
         TransportRc& transport_rc)
 {
+    DWORD dwCommEvent;
     DWORD bytes_read = 0;
 
-    COMMTIMEOUTS timeouts;
+    COMMTIMEOUTS timeouts = {0};
 
-    GetCommTimeouts(comPort_, &timeouts);
-    timeouts.ReadIntervalTimeout = timeout;
-    SetCommTimeouts(comPort_, &timeouts);
+    if (GetCommTimeouts(comPort_, &timeouts))
+    {
+        timeouts.ReadIntervalTimeout = MAXDWORD;
+        timeouts.ReadTotalTimeoutConstant = timeout;
+        timeouts.ReadTotalTimeoutMultiplier = MAXDWORD;
+        timeouts.WriteTotalTimeoutMultiplier = MAXDWORD;
+        timeouts.WriteTotalTimeoutConstant = MAXDWORD;
 
-    if (!ReadFile(comPort_, buf, (DWORD)len, &bytes_read, NULL))
+        SetCommTimeouts(comPort_, &timeouts);
+    }
+
+    if (!ReadFile(comPort_, buf, len, &bytes_read, NULL))
     {
         transport_rc = (GetLastError() == WAIT_TIMEOUT) ? TransportRc::timeout_error : TransportRc::server_error;
     }
