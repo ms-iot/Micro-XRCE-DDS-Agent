@@ -64,7 +64,20 @@ bool AgentInstance::create(
             agent_thread_ = std::move(agent::create_agent_thread<TCPv6Agent>(argc, argv, exit_signal, valid_transport));
             break;
         }
-#ifndef _WIN32
+#ifdef _WIN32
+        case agent::TransportKind::SERIAL:
+        {
+            agent_thread_ = std::move(agent::create_agent_thread<SerialAgent>(argc, argv, exit_signal, valid_transport));
+            break;
+        }
+#ifdef WIN32_MULTI
+        case agent::TransportKind::MULTISERIAL:
+        {
+            agent_thread_ = std::move(agent::create_agent_thread<MultiSerialAgent>(argc, argv, exit_signal, valid_transport));
+            break;
+        }
+#endif
+#else
 #ifdef UAGENT_SOCKETCAN_PROFILE
         case agent::TransportKind::CAN:
         {
